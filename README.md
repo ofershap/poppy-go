@@ -2,7 +2,7 @@
 
 Accept Personal Agent Protocol (Poppy) traffic in a Go backend without pulling in a framework: the discovery document, the `Poppy-Session` header with delegated keys, and agent client assertions as small, dependency-free packages.
 
-[Poppy](https://personalagentprotocol.org/) (draft 1.0) is an open protocol that lets personal agents discover companies, run sessions, and act for users through APIs, web pages, and company agents. The official company kit is a coding-agent skill plus a Node validator. `poppy-go` is the Go library layer for the same company side: the pieces an API gateway or Go service needs before any business logic runs.
+[Poppy](https://personalagentprotocol.org/) (draft 1.0) is an open protocol that lets personal agents discover companies, run sessions, and act for users through APIs, web pages, and company agents. The [official company kit](https://github.com/personal-agent-protocol/personal-agent-protocol) is a coding-agent skill plus a Node validator. `poppy-go` is the Go library layer for the same company side: the pieces an API gateway or Go service needs before any business logic runs.
 
 ## What you get
 
