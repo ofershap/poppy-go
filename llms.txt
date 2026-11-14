@@ -1,0 +1,21 @@
+# poppy-go
+
+> Accept Personal Agent Protocol (Poppy) traffic in a Go backend without a
+> framework (github.com/ofershap/poppy-go): the /.well-known/poppy.json
+> discovery document, the Poppy-Session header with delegated keys, and agent
+> client assertions as small, standard-library-only packages. Independent
+> implementation of the Poppy draft 1.0 company side, checked against the
+> official Node validator.
+
+## Usage
+
+- poppyjson: build, validate (spec MUST-level invariants) and serve /.well-known/poppy.json with correct content type and caching.
+- session: verify the Poppy-Session header (spec 5.2, 5.3) - ES256 delegated keys vouched by a poppy_dlg delegation, checks in spec order, replay and token-binding included.
+- clientassert: verify private_key_jwt client assertions (RFC 7523) at your token endpoint, keys resolved from agent metadata with a bounded HTTPS fetcher and cache.
+- All packages work on plain net/http; no jwt dependency tree.
+
+## Docs
+
+- [README](https://github.com/ofershap/poppy-go#readme): install, package tour, spec coverage, Q&A
+- [pkg.go.dev](https://pkg.go.dev/github.com/ofershap/poppy-go): library API
+- [Poppy protocol](https://personalagentprotocol.org/): the draft spec this implements
