@@ -142,10 +142,17 @@ func (v *Verifier) CheckVersion(r *http.Request) *Error {
 // request. On success it returns the Session identity; on failure an *Error
 // whose Code is the protocol error to report.
 func (v *Verifier) VerifyRequest(r *http.Request) (*Identity, *Error) {
+	// Session first: a missing or bad Session header is invalid_session
+	// even when Poppy-Version is missing too, so the agent learns how to
+	// fix the Session (spec 5.3). Then the version gate (spec 3.4).
+	id, serr := v.Verify(r)
+	if serr != nil {
+		return nil, serr
+	}
 	if verr := v.CheckVersion(r); verr != nil {
 		return nil, verr
 	}
-	return v.Verify(r)
+	return id, nil
 }
 
 // Verify checks the Poppy-Session header of one request, without the

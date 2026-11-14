@@ -244,10 +244,10 @@ func TestOrdersSessionFlow(t *testing.T) {
 	defer s.Close()
 	ordersURL := s.URL + "/orders"
 
-	// No headers at all: the version check runs first.
+	// No headers at all: the Session check runs first.
 	st, _, m := ordersRequest(t, s, "", "", "")
-	if st != 400 || m["error"] != "version_unsupported" {
-		t.Fatalf("no version: %d %v", st, m)
+	if st != 400 || m["error"] != "invalid_session" {
+		t.Fatalf("no headers: %d %v", st, m)
 	}
 	// Version, no Session header: invalid_session.
 	st, _, m = ordersRequest(t, s, "", "1.0", "")
@@ -255,12 +255,13 @@ func TestOrdersSessionFlow(t *testing.T) {
 		t.Fatalf("no session: %d %v", st, m)
 	}
 	// Unsupported version with a valid Session header.
-	jwt := agent.sessionJWT(t, issuer, "GET", ordersURL, "", "jti-1")
-	st, _, m = ordersRequest(t, s, jwt, "0.0", "")
+	badVer := agent.sessionJWT(t, issuer, "GET", ordersURL, "", "jti-v")
+	st, _, m = ordersRequest(t, s, badVer, "0.0", "")
 	if st != 400 || m["error"] != "version_unsupported" {
 		t.Fatalf("version 0.0: %d %v", st, m)
 	}
 	// Valid signed-out Session: 200.
+	jwt := agent.sessionJWT(t, issuer, "GET", ordersURL, "", "jti-1")
 	st, _, m = ordersRequest(t, s, jwt, "1.0", "")
 	if st != 200 || m["session_id"] != "sid-1" || m["user_id"] != "usr_1" {
 		t.Fatalf("valid session: %d %v", st, m)

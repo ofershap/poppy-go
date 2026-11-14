@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/sha256"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -392,8 +393,10 @@ func TestAccessTokenATH(t *testing.T) {
 func TestVersionCheck(t *testing.T) {
 	a := newAgent(t)
 	v := newVerifier(a)
-	jwt := a.sessionJWT(t, jwtOpts{})
-	for _, version := range []string{"", "0.0"} {
+	// Each case needs a fresh jti: session verification runs first and
+	// consumes it.
+	for i, version := range []string{"", "0.0"} {
+		jwt := a.sessionJWT(t, jwtOpts{jti: fmt.Sprintf("jti-v%d", i)})
 		_, serr := verify(t, v, jwt, version, "")
 		if serr == nil || serr.Code != CodeVersionUnsupported {
 			t.Fatalf("version %q: %v", version, serr)

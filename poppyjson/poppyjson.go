@@ -97,7 +97,7 @@ type Web struct {
 
 var (
 	versionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
-	domainPattern  = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+(:[1-9][0-9]{0,4})?$`)
+	domainPattern  = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[1-9][0-9]{0,4})?$`)
 	httpsPattern   = regexp.MustCompile(`^https://[^\s/?#]+`)
 	// Extensions the protocol defines; anyone else starts an extension's
 	// name with a domain they control (spec 3.3).
