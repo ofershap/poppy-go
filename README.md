@@ -77,7 +77,7 @@ a, err := cv.Verify(ctx, clientAssertion) // RFC 7523 private_key_jwt, ES256
 - Sign-in flows (Direct, Device, Mediated), token issuance, or consent UI. This library verifies credentials; your OAuth server issues them.
 - Conversations, web browser-session handoff, or extensions (operations, UCP). Discovery document fields exist; the protocols are out of scope.
 - Automatic JWKS rotation for your issuer keys: `IssuerKeys` is a callback so you control caching and rotation.
-- Conformance certification. `poppy-go` targets Poppy draft 1.0 and is checked by unit tests; it has not yet been run against the official Node validator. Treat it as early-stage until that interop pass lands.
+- Conformance certification. `poppy-go` targets Poppy draft 1.0 and is checked by unit tests (positive and adversarial negative cases) but has not yet been run against the official Node validator and has not been independently security-audited. It is early-stage: evaluate it before trusting it with production traffic.
 
 ## Notes
 

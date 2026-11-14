@@ -90,6 +90,18 @@ func (c *MemoryReplayCache) Seen(jti string) bool {
 }
 
 // Verifier checks DPoP proofs and Session Tokens for one Company deployment.
+//
+// Trust-boundary notes (from adversarial review):
+//   - htu is compared against scheme://Host/path. Validate/normalize the Host
+//     header at your edge; a forged Host otherwise forges the proof binding.
+//   - IssuerKeys must resolve kids against a fixed, operator-controlled key
+//     set. Never let the kid value drive a network fetch (SSRF).
+//   - Token fields (session_id, user_id, scopes) are attacker-visible strings
+//     until verified; downstream code must still treat them as data.
+//   - Always pass the presented access token to VerifyProof so the ath claim
+//     is checked; calling without it skips the token binding.
+//   - MemoryReplayCache is per-process and purges on access. Put a shared
+//     cache (ReplayCache) behind multi-replica deployments.
 type Verifier struct {
 	// Issuer is the Company's OAuth issuer identifier; session tokens must
 	// carry it as iss.
@@ -201,7 +213,10 @@ func (v *Verifier) VerifyProof(r *http.Request, accessToken string) (*Proof, err
 	if d := v.now().Sub(iat); d > v.maxProofAge() || d < -v.maxProofAge() {
 		return nil, ErrProofExpired
 	}
-	if v.Replay != nil && claims.JTI != "" && v.Replay.Seen(claims.JTI) {
+	if claims.JTI == "" {
+		return nil, ErrMalformedProof // RFC 9449 §4.2: jti is REQUIRED
+	}
+	if v.Replay != nil && v.Replay.Seen(claims.JTI) {
 		return nil, ErrReplay
 	}
 	if accessToken != "" {
@@ -278,8 +293,11 @@ func (v *Verifier) VerifyToken(raw string, proof *Proof) (*Token, error) {
 	if v.now().Unix() >= claims.EXP {
 		return nil, ErrTokenExpired
 	}
-	if proof != nil && claims.CNF.JKT != "" && claims.CNF.JKT != proof.KeyThumbprint {
-		return nil, ErrBadBinding
+	if proof != nil {
+		// Spec 4.2: every Session Token is bound to a key the agent holds.
+		if claims.CNF.JKT == "" || claims.CNF.JKT != proof.KeyThumbprint {
+			return nil, ErrBadBinding
+		}
 	}
 	var scopes []string
 	if claims.Scp != "" {

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -107,5 +108,66 @@ func TestVerifyProofRoundtrip(t *testing.T) {
 	r4.Header.Set(DPoPHeader, other)
 	if _, err := v.VerifyProof(r4, "real-token"); err != ErrTokenBinding {
 		t.Fatalf("ath mismatch: got %v, want ErrTokenBinding", err)
+	}
+}
+
+func TestAdversarialNegativeCases(t *testing.T) {
+	key, _ := GenerateTestKey()
+	v := &Verifier{Replay: NewMemoryReplayCache(10 * time.Minute)}
+	hdr := map[string]any{"typ": "dpop+jwt", "alg": "ES256", "jwk": jwkFor(key)}
+
+	// Missing jti must fail closed (otherwise replay checks are skippable).
+	r := httptest.NewRequest("GET", "https://api.example.com/o", nil)
+	r.Header.Set(DPoPHeader, signES256(t, key, hdr, map[string]any{
+		"htm": "GET", "htu": "https://api.example.com/o", "iat": time.Now().Unix(),
+	}))
+	if _, err := v.VerifyProof(r, ""); err != ErrMalformedProof {
+		t.Fatalf("missing jti: got %v, want ErrMalformedProof", err)
+	}
+
+	// Stale iat must fail.
+	r = httptest.NewRequest("GET", "https://api.example.com/o", nil)
+	r.Header.Set(DPoPHeader, signES256(t, key, hdr, map[string]any{
+		"jti": "old", "htm": "GET", "htu": "https://api.example.com/o",
+		"iat": time.Now().Add(-time.Hour).Unix(),
+	}))
+	if _, err := v.VerifyProof(r, ""); err != ErrProofExpired {
+		t.Fatalf("stale iat: got %v, want ErrProofExpired", err)
+	}
+
+	// Wrong htu must fail.
+	r = httptest.NewRequest("GET", "https://api.example.com/other", nil)
+	r.Header.Set(DPoPHeader, signES256(t, key, hdr, map[string]any{
+		"jti": "u1", "htm": "GET", "htu": "https://api.example.com/o",
+		"iat": time.Now().Unix(),
+	}))
+	if _, err := v.VerifyProof(r, ""); err != ErrURIMismatch {
+		t.Fatalf("htu: got %v, want ErrURIMismatch", err)
+	}
+}
+
+func TestTokenWithoutBindingFailsClosed(t *testing.T) {
+	issuerKey, _ := GenerateTestKey()
+	agentKey, _ := GenerateTestKey()
+	v := &Verifier{
+		Issuer: "https://auth.example.com", Audience: "https://api.example.com",
+		IssuerKeys: func(kid string) (crypto.PublicKey, error) { return &issuerKey.PublicKey, nil },
+		Replay:     NewMemoryReplayCache(10 * time.Minute),
+	}
+	r := httptest.NewRequest("GET", "https://api.example.com/o", nil)
+	r.Header.Set(DPoPHeader, signES256(t, agentKey,
+		map[string]any{"typ": "dpop+jwt", "alg": "ES256", "jwk": jwkFor(agentKey)},
+		map[string]any{"jti": "b1", "htm": "GET", "htu": "https://api.example.com/o", "iat": time.Now().Unix()}))
+	p, err := v.VerifyProof(r, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Token with no cnf at all must be rejected when a proof is presented.
+	raw := signToken(t, issuerKey, map[string]any{
+		"iss": "https://auth.example.com", "aud": "https://api.example.com",
+		"exp": time.Now().Add(time.Minute).Unix(),
+	})
+	if _, err := v.VerifyToken(raw, p); err != ErrBadBinding {
+		t.Fatalf("unbound token: got %v, want ErrBadBinding", err)
 	}
 }

@@ -106,10 +106,27 @@ type cacheEntry struct {
 	until time.Time
 }
 
-// NewClient returns a Client with production defaults.
+// MaxCacheEntries bounds the metadata/JWKS cache (default 1024) so a stream
+// of distinct agent client_ids cannot grow memory without limit.
+const MaxCacheEntries = 1024
+
+// NewClient returns a Client with production defaults. The HTTP client
+// rejects redirects to non-https URLs: the client_id is required to be an
+// https URL, and a downgrade redirect must not turn the fetch into SSRF.
 func NewClient() *Client {
 	return &Client{
-		HTTP:    &http.Client{Timeout: 10 * time.Second},
+		HTTP: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if req.URL.Scheme != "https" {
+					return fmt.Errorf("clientassert: refusing redirect to %s", req.URL.Scheme)
+				}
+				if len(via) >= 5 {
+					return errors.New("clientassert: too many redirects")
+				}
+				return nil
+			},
+		},
 		MaxBody: 64 << 10,
 		cache:   make(map[string]cacheEntry),
 		TTL:     10 * time.Minute,
@@ -173,6 +190,13 @@ func (c *Client) get(ctx context.Context, rawurl string, out any) error {
 		return fmt.Errorf("%w: invalid JSON", ErrMetadataFetch)
 	}
 	c.mu.Lock()
+	if len(c.cache) >= MaxCacheEntries {
+		// Evict an arbitrary entry; the cache is an optimization, not state.
+		for k := range c.cache {
+			delete(c.cache, k)
+			break
+		}
+	}
 	c.cache[rawurl] = cacheEntry{doc: out, until: time.Now().Add(c.ttl())}
 	c.mu.Unlock()
 	return nil
@@ -204,6 +228,9 @@ type Verifier struct {
 	Fetcher Fetcher
 	// MaxAssertionAge bounds assertion iat/exp window. Default 5 minutes.
 	MaxAssertionAge time.Duration
+	// SeenJTI, when set, records assertion jti values and rejects replays
+	// (RFC 7523 §3: assertions are one-time-use). Return true on replay.
+	SeenJTI func(clientID, jti string) bool
 	// Now supplies the current time (test hook).
 	Now func() time.Time
 }
@@ -274,6 +301,10 @@ func (v *Verifier) Verify(ctx context.Context, assertion string) (*Assertion, er
 	}
 	if claims.IAT > 0 && now.Sub(time.Unix(claims.IAT, 0)) > maxAge {
 		return nil, ErrExpired
+	}
+
+	if claims.JTI != "" && v.SeenJTI != nil && v.SeenJTI(claims.ISS, claims.JTI) {
+		return nil, fmt.Errorf("clientassert: assertion jti replayed")
 	}
 
 	keys, err := v.keysFor(ctx, claims.ISS)

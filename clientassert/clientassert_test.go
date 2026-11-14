@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -159,5 +160,40 @@ func TestJWKSUriFallback(t *testing.T) {
 	a := sign(t, key, map[string]any{"typ": "JWT", "alg": "ES256", "kid": "k1"}, validClaims())
 	if _, err := v.Verify(context.Background(), a); err != nil {
 		t.Fatalf("jwks_uri fallback rejected: %v", err)
+	}
+}
+
+func TestAssertionReplayRejected(t *testing.T) {
+	key, v := setup(t)
+	seen := map[string]bool{}
+	v.SeenJTI = func(clientID, jti string) bool {
+		k := clientID + "|" + jti
+		if seen[k] {
+			return true
+		}
+		seen[k] = true
+		return false
+	}
+	a := sign(t, key, map[string]any{"typ": "JWT", "alg": "ES256", "kid": "k1"}, validClaims())
+	if _, err := v.Verify(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Verify(context.Background(), a); err == nil {
+		t.Fatal("replayed assertion accepted")
+	}
+}
+
+func TestRedirectDowngradeRejected(t *testing.T) {
+	c := NewClient()
+	if c.HTTP.CheckRedirect == nil {
+		t.Fatal("NewClient must install a redirect policy")
+	}
+	req, _ := http.NewRequest("GET", "http://169.254.169.254/latest/meta-data", nil)
+	if err := c.HTTP.CheckRedirect(req, nil); err == nil {
+		t.Fatal("http redirect target must be rejected")
+	}
+	req2, _ := http.NewRequest("GET", "https://agent.example/jwks.json", nil)
+	if err := c.HTTP.CheckRedirect(req2, nil); err != nil {
+		t.Fatalf("https redirect rejected: %v", err)
 	}
 }
