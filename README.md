@@ -84,6 +84,7 @@ a, err := cv.Verify(ctx, clientAssertion) // RFC 7523 private_key_jwt, ES256
 - ES256 is the only supported signature algorithm, matching the one algorithm the spec requires every company to accept.
 - DPoP `htu` comparison follows RFC 9449 (absolute URI without query).
 - The replay cache is per-process; deploy multiple replicas behind a shared cache by implementing `session.ReplayCache`.
+- The metadata fetcher treats agent client_ids as untrusted URLs: https-only, no non-https redirects, and only public IP destinations (checked per connection, including redirects and re-resolution). For agents inside a private network, supply your own `*http.Client` with an explicit destination policy.
 
 <details>
 <summary><strong>Q&amp;A</strong></summary>

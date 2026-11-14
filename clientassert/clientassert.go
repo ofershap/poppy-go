@@ -17,7 +17,9 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -92,6 +94,14 @@ type Fetcher interface {
 
 // Client fetches agent metadata over HTTPS with a bounded cache so the token
 // endpoint does not fetch the client_id document on every assertion.
+//
+// Trust model: agent client_ids are arbitrary third-party URLs, so NewClient
+// fetches only https URLs, refuses redirects to non-https, and dials only
+// public IP destinations (checked per connection, initial request and every
+// redirect hop). Deployments that intentionally talk to agents inside a
+// private network must construct their own *http.Client with an explicit
+// destination policy and set Client.HTTP - the default dialer will refuse
+// those destinations.
 type Client struct {
 	HTTP    *http.Client
 	MaxBody int64 // default 64 KiB
@@ -110,11 +120,58 @@ type cacheEntry struct {
 // of distinct agent client_ids cannot grow memory without limit.
 const MaxCacheEntries = 1024
 
+// IsPublicAddr reports whether ip is a public unicast address. Loopback,
+// private (RFC 1918 / ULA), link-local, unspecified, and multicast addresses
+// are not public.
+func IsPublicAddr(ip netip.Addr) bool {
+	if !ip.IsValid() {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	// 100.64.0.0/10 (CGNAT) is not globally routable either.
+	if ip.Is4() && ip.As4()[0] == 100 && ip.As4()[1] >= 64 && ip.As4()[1] <= 127 {
+		return false
+	}
+	return ip.IsGlobalUnicast()
+}
+
+// publicDialer returns a DialContext that rejects any connection whose
+// resolved addresses include a non-public IP. Every connection (initial
+// request and each redirect hop) is resolved and checked at dial time, so a
+// hostname that later re-resolves to a private address (DNS rebinding) is
+// rejected on the connection that would reach it.
+func publicDialer() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: 10 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("clientassert: no addresses for %s", host)
+		}
+		for _, ip := range ips {
+			na, ok := netip.AddrFromSlice(ip)
+			if !ok || !IsPublicAddr(na) {
+				return nil, fmt.Errorf("clientassert: refusing non-public destination %s", host)
+			}
+		}
+		return d.DialContext(ctx, network, net.JoinHostPort(host, port))
+	}
+}
+
 // NewClient returns a Client with production defaults. The HTTP client
 // rejects redirects to non-https URLs: the client_id is required to be an
 // https URL, and a downgrade redirect must not turn the fetch into SSRF.
 func NewClient() *Client {
-	return &Client{
+	c := &Client{
 		HTTP: &http.Client{
 			Timeout: 10 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -131,6 +188,11 @@ func NewClient() *Client {
 		cache:   make(map[string]cacheEntry),
 		TTL:     10 * time.Minute,
 	}
+	// Default policy: only public destinations, checked per connection.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = publicDialer()
+	c.HTTP.Transport = tr
+	return c
 }
 
 func (c *Client) maxBody() int64 {
@@ -151,7 +213,9 @@ func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Timeout: 10 * time.Second}
+	// A zero-value Client keeps the same safe defaults as NewClient:
+	// https-only redirects and public destinations only.
+	return NewClient().HTTP
 }
 
 func (c *Client) get(ctx context.Context, rawurl string, out any) error {

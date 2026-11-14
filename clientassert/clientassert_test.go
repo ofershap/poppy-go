@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -195,5 +197,34 @@ func TestRedirectDowngradeRejected(t *testing.T) {
 	req2, _ := http.NewRequest("GET", "https://agent.example/jwks.json", nil)
 	if err := c.HTTP.CheckRedirect(req2, nil); err != nil {
 		t.Fatalf("https redirect rejected: %v", err)
+	}
+}
+
+func TestIsPublicAddr(t *testing.T) {
+	cases := map[string]bool{
+		"8.8.8.8": true, "1.1.1.1": true, "2606:4700:4700::1111": true,
+		"127.0.0.1": false, "10.0.0.1": false, "172.16.0.1": false,
+		"192.168.1.1": false, "169.254.169.254": false, "0.0.0.0": false,
+		"100.64.0.1": false, "::1": false, "fc00::1": false, "fe80::1": false,
+		"224.0.0.1": false, "255.255.255.255": false,
+	}
+	for s, want := range cases {
+		ip := netip.MustParseAddr(s)
+		if got := IsPublicAddr(ip); got != want {
+			t.Errorf("IsPublicAddr(%s) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// The default fetcher must refuse to dial loopback even for an https URL,
+// closing the private-destination and rebinding paths at connection time.
+func TestDefaultDialerRejectsLoopback(t *testing.T) {
+	srv := httptest.NewTLSServer(nil) // listens on 127.0.0.1
+	defer srv.Close()
+	c := NewClient()
+	_, err := c.HTTP.Transport.(*http.Transport).DialContext(
+		context.Background(), "tcp", srv.Listener.Addr().String())
+	if err == nil {
+		t.Fatal("loopback dial must be rejected")
 	}
 }
