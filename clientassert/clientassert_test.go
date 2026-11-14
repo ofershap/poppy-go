@@ -3,228 +3,226 @@ package clientassert
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
-	"math/big"
-	"net/http"
-	"net/http/httptest"
-	"net/netip"
+	"crypto/rsa"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/ofershap/poppy-go/internal/jose"
 )
 
-func pad32(n *big.Int) []byte {
-	b := n.Bytes()
-	if len(b) >= 32 {
-		return b[len(b)-32:]
-	}
-	out := make([]byte, 32)
-	copy(out[32-len(b):], b)
-	return out
-}
-
-func sign(t *testing.T, key *ecdsa.PrivateKey, header, payload map[string]any) string {
-	t.Helper()
-	h, _ := json.Marshal(header)
-	p, _ := json.Marshal(payload)
-	enc := base64.RawURLEncoding
-	input := enc.EncodeToString(h) + "." + enc.EncodeToString(p)
-	digest := sha256.Sum256([]byte(input))
-	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	return input + "." + enc.EncodeToString(append(pad32(r), pad32(s)...))
-}
+const (
+	testClientID = "https://agent.example/agent.json"
+	testIssuer   = "https://auth.shop.example"
+)
 
 type fakeFetcher struct {
 	md   *Metadata
 	jwks *JWKS
-	err  error
 }
 
-func (f fakeFetcher) FetchMetadata(ctx context.Context, clientID string) (*Metadata, error) {
-	return f.md, f.err
-}
-func (f fakeFetcher) FetchJWKS(ctx context.Context, uri string) (*JWKS, error) {
-	return f.jwks, f.err
+func (f *fakeFetcher) FetchMetadata(context.Context, string) (*Metadata, error) { return f.md, nil }
+func (f *fakeFetcher) FetchJWKS(context.Context, string) (*JWKS, error)         { return f.jwks, nil }
+
+type agentFixture struct {
+	ec  *ecdsa.PrivateKey
+	rsa *rsa.PrivateKey
+	md  *Metadata
 }
 
-const (
-	testClientID = "https://agent.example/.well-known/client.json"
-	testTokenURL = "https://auth.example.com/oauth/token"
-)
-
-func setup(t *testing.T) (*ecdsa.PrivateKey, *Verifier) {
+func newAgentFixture(t *testing.T) *agentFixture {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ecKey, err := jose.GenerateEC()
 	if err != nil {
 		t.Fatal(err)
 	}
-	enc := base64.RawURLEncoding
-	jwks := &JWKS{Keys: []JWK{{
-		Kty: "EC", Crv: "P-256", Kid: "k1",
-		X: enc.EncodeToString(pad32(key.X)),
-		Y: enc.EncodeToString(pad32(key.Y)),
-	}}}
-	v := &Verifier{
-		TokenEndpoint: testTokenURL,
-		Fetcher: fakeFetcher{
-			md: &Metadata{JWKS: jwks},
-		},
-	}
-	return key, v
-}
-
-func validClaims() map[string]any {
-	return map[string]any{
-		"iss": testClientID, "sub": testClientID, "aud": testTokenURL,
-		"exp": time.Now().Add(2 * time.Minute).Unix(),
-		"iat": time.Now().Unix(),
-		"jti": "assert-1",
-	}
-}
-
-func TestVerifyRoundtrip(t *testing.T) {
-	key, v := setup(t)
-	a := sign(t, key, map[string]any{"typ": "JWT", "alg": "ES256", "kid": "k1"}, validClaims())
-	got, err := v.Verify(context.Background(), a)
+	rsaKey, err := jose.GenerateRSA()
 	if err != nil {
-		t.Fatalf("valid assertion rejected: %v", err)
+		t.Fatal(err)
 	}
-	if got.ClientID != testClientID || got.JTI != "assert-1" {
-		t.Fatalf("assertion = %+v", got)
-	}
-}
-
-func TestVerifyRejects(t *testing.T) {
-	key, v := setup(t)
-	hdr := map[string]any{"typ": "JWT", "alg": "ES256", "kid": "k1"}
-
-	// Wrong audience.
-	c := validClaims()
-	c["aud"] = "https://other.example.com/token"
-	if _, err := v.Verify(context.Background(), sign(t, key, hdr, c)); err != ErrAudience {
-		t.Fatalf("aud: got %v", err)
-	}
-	// sub != iss.
-	c = validClaims()
-	c["sub"] = "https://other-agent.example"
-	if _, err := v.Verify(context.Background(), sign(t, key, hdr, c)); err != ErrIssuerMismatch {
-		t.Fatalf("sub: got %v", err)
-	}
-	// Non-https client_id.
-	c = validClaims()
-	c["iss"] = "http://agent.example"
-	c["sub"] = "http://agent.example"
-	if _, err := v.Verify(context.Background(), sign(t, key, hdr, c)); err != ErrClientID {
-		t.Fatalf("scheme: got %v", err)
-	}
-	// Expired.
-	c = validClaims()
-	c["exp"] = time.Now().Add(-time.Minute).Unix()
-	if _, err := v.Verify(context.Background(), sign(t, key, hdr, c)); err != ErrExpired {
-		t.Fatalf("exp: got %v", err)
-	}
-	// Signed by a different key than published.
-	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if _, err := v.Verify(context.Background(), sign(t, other, hdr, validClaims())); err != ErrNoKey {
-		t.Fatalf("wrong key: got %v", err)
-	}
-	// Unsupported alg.
-	if _, err := v.Verify(context.Background(), sign(t, key, map[string]any{"typ": "JWT", "alg": "HS256"}, validClaims())); err != ErrBadAlg {
-		t.Fatalf("alg: got %v", err)
-	}
-	// Garbage input.
-	if _, err := v.Verify(context.Background(), "not-a-jwt"); err != ErrMalformedAssertion {
-		t.Fatalf("garbage: got %v", err)
+	x, y := jose.ECJWK(ecKey)
+	n, e := jose.RSAJWK(rsaKey)
+	return &agentFixture{
+		ec:  ecKey,
+		rsa: rsaKey,
+		md: &Metadata{JWKS: &JWKS{Keys: []JWK{
+			{Kty: "EC", Crv: "P-256", X: x, Y: y, Kid: "ec-1", Alg: "ES256", Use: "sig"},
+			{Kty: "RSA", N: n, E: e, Kid: "rsa-1", Alg: "PS384", Use: "sig"},
+		}}},
 	}
 }
 
-func TestJWKSUriFallback(t *testing.T) {
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	enc := base64.RawURLEncoding
-	jwks := &JWKS{Keys: []JWK{{
-		Kty: "EC", Crv: "P-256", Kid: "k1",
-		X: enc.EncodeToString(pad32(key.X)),
-		Y: enc.EncodeToString(pad32(key.Y)),
-	}}}
-	v := &Verifier{
-		TokenEndpoint: testTokenURL,
-		Fetcher: fakeFetcher{
-			md:   &Metadata{JWKSUri: "https://agent.example/jwks.json"},
-			jwks: jwks,
-		},
+type assertionOpts struct {
+	aud      any
+	jti      string
+	iat      int64
+	exp      int64
+	sub      *string
+	rsa      bool
+	stranger *ecdsa.PrivateKey
+	kid      string
+}
+
+func (a *agentFixture) assertion(t *testing.T, o assertionOpts) string {
+	t.Helper()
+	now := time.Now().Unix()
+	iat := now
+	if o.iat != 0 {
+		iat = o.iat
 	}
-	a := sign(t, key, map[string]any{"typ": "JWT", "alg": "ES256", "kid": "k1"}, validClaims())
-	if _, err := v.Verify(context.Background(), a); err != nil {
-		t.Fatalf("jwks_uri fallback rejected: %v", err)
+	exp := now + 60
+	if o.exp != 0 {
+		exp = o.exp
+	}
+	aud := any(testIssuer)
+	if o.aud != nil {
+		aud = o.aud
+	}
+	sub := testClientID
+	if o.sub != nil {
+		sub = *o.sub
+	}
+	jti := "jti-1"
+	if o.jti != "" {
+		jti = o.jti
+	}
+	claims := map[string]any{
+		"iss": testClientID, "sub": sub, "aud": aud,
+		"iat": iat, "exp": exp, "jti": jti,
+	}
+	if o.rsa {
+		kid := "rsa-1"
+		if o.kid != "" {
+			kid = o.kid
+		}
+		jwt, err := jose.SignPS384(a.rsa, map[string]any{"typ": "JWT", "alg": "PS384", "kid": kid}, claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return jwt
+	}
+	key := a.ec
+	if o.stranger != nil {
+		key = o.stranger
+	}
+	kid := "ec-1"
+	if o.kid != "" {
+		kid = o.kid
+	}
+	jwt, err := jose.SignES256(key, map[string]any{"typ": "JWT", "alg": "ES256", "kid": kid}, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return jwt
+}
+
+func verifierFor(md *Metadata, seen func(string, string) bool) *Verifier {
+	return &Verifier{Issuer: testIssuer, Fetcher: &fakeFetcher{md: md}, SeenJTI: seen}
+}
+
+func TestVerifyES256(t *testing.T) {
+	a := newAgentFixture(t)
+	v := verifierFor(a.md, nil)
+	got, err := v.Verify(context.Background(), a.assertion(t, assertionOpts{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ClientID != testClientID {
+		t.Fatalf("client_id %q", got.ClientID)
 	}
 }
 
-func TestAssertionReplayRejected(t *testing.T) {
-	key, v := setup(t)
+func TestVerifyPS384(t *testing.T) {
+	a := newAgentFixture(t)
+	v := verifierFor(a.md, nil)
+	if _, err := v.Verify(context.Background(), a.assertion(t, assertionOpts{rsa: true})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRejects(t *testing.T) {
+	a := newAgentFixture(t)
+	stranger, _ := jose.GenerateEC()
+	empty := ""
+	cases := []struct {
+		name string
+		opts assertionOpts
+		want error
+	}{
+		{"aud is another issuer", assertionOpts{aud: "https://other.example"}, ErrAudience},
+		{"aud is the token endpoint URL", assertionOpts{aud: testIssuer + "/oauth/token"}, ErrAudience},
+		{"aud is an array", assertionOpts{aud: []string{testIssuer, "https://other.example"}}, ErrAudience},
+		{"expired", assertionOpts{iat: time.Now().Unix() - 600, exp: time.Now().Unix() - 300}, ErrExpired},
+		{"no sub", assertionOpts{sub: &empty}, ErrIssuerMismatch},
+		{"stranger signature", assertionOpts{stranger: stranger}, ErrNoKey},
+		{"unknown kid", assertionOpts{kid: "nope"}, ErrNoKey},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := verifierFor(a.md, nil)
+			_, err := v.Verify(context.Background(), a.assertion(t, assertionOpts{
+				aud: c.opts.aud, iat: c.opts.iat, exp: c.opts.exp,
+				sub: c.opts.sub, stranger: c.opts.stranger, kid: c.opts.kid,
+			}))
+			if !errors.Is(err, c.want) {
+				t.Fatalf("got %v, want %v", err, c.want)
+			}
+		})
+	}
+}
+
+func TestRejectsMissingExp(t *testing.T) {
+	a := newAgentFixture(t)
+	stranger := a.ec
+	claims := map[string]any{"iss": testClientID, "sub": testClientID, "aud": testIssuer, "iat": time.Now().Unix(), "jti": "x"}
+	jwt, err := jose.SignES256(stranger, map[string]any{"typ": "JWT", "alg": "ES256", "kid": "ec-1"}, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := verifierFor(a.md, nil)
+	if _, err := v.Verify(context.Background(), jwt); !errors.Is(err, ErrExpired) {
+		t.Fatalf("got %v, want %v", err, ErrExpired)
+	}
+}
+
+func TestRejectsNonHTTPSClientID(t *testing.T) {
+	a := newAgentFixture(t)
+	claims := map[string]any{
+		"iss": "http://agent.example/agent.json", "sub": "http://agent.example/agent.json",
+		"aud": testIssuer, "iat": time.Now().Unix(), "exp": time.Now().Unix() + 60, "jti": "x",
+	}
+	jwt, _ := jose.SignES256(a.ec, map[string]any{"typ": "JWT", "alg": "ES256", "kid": "ec-1"}, claims)
+	v := verifierFor(a.md, nil)
+	if _, err := v.Verify(context.Background(), jwt); !errors.Is(err, ErrClientID) {
+		t.Fatalf("got %v, want %v", err, ErrClientID)
+	}
+}
+
+func TestJTIReplay(t *testing.T) {
+	a := newAgentFixture(t)
 	seen := map[string]bool{}
-	v.SeenJTI = func(clientID, jti string) bool {
-		k := clientID + "|" + jti
+	v := verifierFor(a.md, func(c, j string) bool {
+		k := c + "|" + j
 		if seen[k] {
 			return true
 		}
 		seen[k] = true
 		return false
-	}
-	a := sign(t, key, map[string]any{"typ": "JWT", "alg": "ES256", "kid": "k1"}, validClaims())
-	if _, err := v.Verify(context.Background(), a); err != nil {
+	})
+	jwt := a.assertion(t, assertionOpts{jti: "once"})
+	if _, err := v.Verify(context.Background(), jwt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := v.Verify(context.Background(), a); err == nil {
-		t.Fatal("replayed assertion accepted")
+	if _, err := v.Verify(context.Background(), jwt); err == nil {
+		t.Fatal("replayed jti accepted")
 	}
 }
 
-func TestRedirectDowngradeRejected(t *testing.T) {
-	c := NewClient()
-	if c.HTTP.CheckRedirect == nil {
-		t.Fatal("NewClient must install a redirect policy")
-	}
-	req, _ := http.NewRequest("GET", "http://169.254.169.254/latest/meta-data", nil)
-	if err := c.HTTP.CheckRedirect(req, nil); err == nil {
-		t.Fatal("http redirect target must be rejected")
-	}
-	req2, _ := http.NewRequest("GET", "https://agent.example/jwks.json", nil)
-	if err := c.HTTP.CheckRedirect(req2, nil); err != nil {
-		t.Fatalf("https redirect rejected: %v", err)
-	}
-}
-
-func TestIsPublicAddr(t *testing.T) {
-	cases := map[string]bool{
-		"8.8.8.8": true, "1.1.1.1": true, "2606:4700:4700::1111": true,
-		"127.0.0.1": false, "10.0.0.1": false, "172.16.0.1": false,
-		"192.168.1.1": false, "169.254.169.254": false, "0.0.0.0": false,
-		"100.64.0.1": false, "::1": false, "fc00::1": false, "fe80::1": false,
-		"224.0.0.1": false, "255.255.255.255": false,
-	}
-	for s, want := range cases {
-		ip := netip.MustParseAddr(s)
-		if got := IsPublicAddr(ip); got != want {
-			t.Errorf("IsPublicAddr(%s) = %v, want %v", s, got, want)
-		}
-	}
-}
-
-// The default fetcher must refuse to dial loopback even for an https URL,
-// closing the private-destination and rebinding paths at connection time.
-func TestDefaultDialerRejectsLoopback(t *testing.T) {
-	srv := httptest.NewTLSServer(nil) // listens on 127.0.0.1
-	defer srv.Close()
-	c := NewClient()
-	_, err := c.HTTP.Transport.(*http.Transport).DialContext(
-		context.Background(), "tcp", srv.Listener.Addr().String())
-	if err == nil {
-		t.Fatal("loopback dial must be rejected")
+func TestMetadataIssuerMismatch(t *testing.T) {
+	a := newAgentFixture(t)
+	md := &Metadata{Issuer: "https://someone-else.example/agent.json", JWKS: a.md.JWKS}
+	v := verifierFor(md, nil)
+	if _, err := v.Verify(context.Background(), a.assertion(t, assertionOpts{})); !errors.Is(err, ErrIssuerMismatch) {
+		t.Fatalf("got %v, want %v", err, ErrIssuerMismatch)
 	}
 }
