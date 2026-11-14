@@ -71,6 +71,7 @@ type dlgOpts struct {
 	iat      int64
 	lifetime int64
 	stranger *ecdsa.PrivateKey
+	cnfD     bool
 }
 
 func (a *agent) delegation(t *testing.T, deleg *ecdsa.PrivateKey, o dlgOpts) string {
@@ -99,6 +100,9 @@ func (a *agent) delegation(t *testing.T, deleg *ecdsa.PrivateKey, o dlgOpts) str
 		"iss": iss,
 		"cnf": map[string]any{"jwk": map[string]any{"kty": "EC", "crv": "P-256", "x": x, "y": y}},
 		"iat": iat, "exp": iat + lifetime, "jti": "dlg-1",
+	}
+	if o.cnfD {
+		claims["cnf"].(map[string]any)["jwk"].(map[string]any)["d"] = "private-material"
 	}
 	if o.rsa {
 		kid := "rsa-1"
@@ -134,6 +138,8 @@ type jwtOpts struct {
 	kid     string
 	sid     string
 	dropSub bool
+	drop    []string
+	ps384   bool
 	aud     string
 	htm     string
 	htu     string
@@ -202,6 +208,17 @@ func (a *agent) sessionJWT(t *testing.T, o jwtOpts) string {
 	}
 	if o.ath != nil {
 		claims["ath"] = *o.ath
+	}
+	for _, k := range o.drop {
+		delete(claims, k)
+	}
+	if o.ps384 {
+		hdr["alg"] = "PS384"
+		jwt, err := jose.SignPS384(a.rsa, hdr, claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return jwt
 	}
 	jwt, err := jose.SignES256(key, hdr, claims)
 	if err != nil {
@@ -343,6 +360,39 @@ func TestRejections(t *testing.T) {
 		}},
 		{"ath without token", func(a *agent) string {
 			return a.sessionJWT(t, jwtOpts{ath: &ath})
+		}},
+		{"session JWT signed PS384", func(a *agent) string {
+			return a.sessionJWT(t, jwtOpts{ps384: true})
+		}},
+		{"delegation PS384 header names EC key", func(a *agent) string {
+			dlg := a.delegation(t, nil, dlgOpts{rsa: true, kid: "ec-1"})
+			return a.sessionJWT(t, jwtOpts{dlg: dlg})
+		}},
+		{"delegation ES256 header names RSA key", func(a *agent) string {
+			dlg := a.delegation(t, nil, dlgOpts{kid: "rsa-1"})
+			return a.sessionJWT(t, jwtOpts{dlg: dlg})
+		}},
+		{"delegation cnf.jwk leaks private key", func(a *agent) string {
+			dlg := a.delegation(t, nil, dlgOpts{cnfD: true})
+			return a.sessionJWT(t, jwtOpts{dlg: dlg})
+		}},
+		{"no iss", func(a *agent) string {
+			return a.sessionJWT(t, jwtOpts{drop: []string{"iss"}})
+		}},
+		{"no aud", func(a *agent) string {
+			return a.sessionJWT(t, jwtOpts{drop: []string{"aud"}})
+		}},
+		{"no sid", func(a *agent) string {
+			return a.sessionJWT(t, jwtOpts{drop: []string{"sid"}})
+		}},
+		{"no jti", func(a *agent) string {
+			return a.sessionJWT(t, jwtOpts{drop: []string{"jti"}})
+		}},
+		{"no htm", func(a *agent) string {
+			return a.sessionJWT(t, jwtOpts{drop: []string{"htm"}})
+		}},
+		{"no htu", func(a *agent) string {
+			return a.sessionJWT(t, jwtOpts{drop: []string{"htu"}})
 		}},
 	}
 	for _, c := range cases {
